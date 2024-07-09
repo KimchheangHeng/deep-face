@@ -10,6 +10,7 @@ import pandas as pd
 from tqdm import tqdm
 
 # project dependencies
+from deepface.commons import image_utils
 from deepface.commons.logger import Logger
 from deepface.commons import package_utils
 from deepface.modules import representation, detection, modeling, verification
@@ -30,6 +31,7 @@ def find(
     threshold: Optional[float] = None,
     normalization: str = "base",
     silent: bool = False,
+    refresh_database: bool = True,
 ) -> List[pd.DataFrame]:
     """
     Identify individuals in a database
@@ -67,6 +69,11 @@ def find(
             Default is base. Options: base, raw, Facenet, Facenet2018, VGGFace, VGGFace2, ArcFace
 
         silent (boolean): Suppress or allow some log messages for a quieter analysis process.
+
+        refresh_database (boolean): Synchronizes the images representation (pkl) file with the
+        directory/db files, if set to false, it will ignore any file changes inside the db_path
+        directory (default is True).
+
 
     Returns:
         results (List[pd.DataFrame]): A list of pandas dataframes. Each dataframe corresponds
@@ -136,29 +143,50 @@ def find(
     pickled_images = [representation["identity"] for representation in representations]
 
     # Get the list of images on storage
-    storage_images = __list_images(path=db_path)
+    storage_images = image_utils.list_images(path=db_path)
 
-    if len(storage_images) == 0:
+    if len(storage_images) == 0 and refresh_database is True:
         raise ValueError(f"No item found in {db_path}")
+    if len(representations) == 0 and refresh_database is False:
+        raise ValueError(f"Nothing is found in {datastore_path}")
+
+    must_save_pickle = False
+    new_images = []
+    old_images = []
+    replaced_images = []
+
+    if not refresh_database:
+        logger.info(
+            f"Could be some changes in {db_path} not tracked."
+            "Set refresh_database to true to assure that any changes will be tracked."
+        )
 
     # Enforce data consistency amongst on disk images and pickle file
-    must_save_pickle = False
-    new_images = list(set(storage_images) - set(pickled_images))  # images added to storage
-    old_images = list(set(pickled_images) - set(storage_images))  # images removed from storage
+    if refresh_database:
+        new_images = list(
+            set(storage_images) - set(pickled_images)
+        )  # images added to storage
 
-    # detect replaced images
-    replaced_images = []
-    for current_representation in representations:
-        identity = current_representation["identity"]
-        if identity in old_images:
-            continue
-        alpha_hash = current_representation["hash"]
-        beta_hash = package_utils.find_hash_of_file(identity)
-        if alpha_hash != beta_hash:
-            logger.debug(f"Even though {identity} represented before, it's replaced later.")
-            replaced_images.append(identity)
+        old_images = list(
+            set(pickled_images) - set(storage_images)
+        )  # images removed from storage
 
-    if not silent and (len(new_images) > 0 or len(old_images) > 0 or len(replaced_images) > 0):
+        # detect replaced images
+        for current_representation in representations:
+            identity = current_representation["identity"]
+            if identity in old_images:
+                continue
+            alpha_hash = current_representation["hash"]
+            beta_hash = image_utils.find_image_hash(identity)
+            if alpha_hash != beta_hash:
+                logger.debug(
+                    f"Even though {identity} represented before, it's replaced later."
+                )
+                replaced_images.append(identity)
+
+    if not silent and (
+        len(new_images) > 0 or len(old_images) > 0 or len(replaced_images) > 0
+    ):
         logger.info(
             f"Found {len(new_images)} newly added image(s)"
             f", {len(old_images)} removed image(s)"
@@ -171,7 +199,9 @@ def find(
 
     # remove old images first
     if len(old_images) > 0:
-        representations = [rep for rep in representations if rep["identity"] not in old_images]
+        representations = [
+            rep for rep in representations if rep["identity"] not in old_images
+        ]
         must_save_pickle = True
 
     # find representations for new images
@@ -192,7 +222,9 @@ def find(
         with open(datastore_path, "wb") as f:
             pickle.dump(representations, f)
         if not silent:
-            logger.info(f"There are now {len(representations)} representations in {file_name}")
+            logger.info(
+                f"There are now {len(representations)} representations in {file_name}"
+            )
 
     # Should we have no representations bailout
     if len(representations) == 0:
@@ -264,7 +296,9 @@ def find(
             distances.append(distance)
 
             # ---------------------------
-        target_threshold = threshold or verification.find_threshold(model_name, distance_metric)
+        target_threshold = threshold or verification.find_threshold(
+            model_name, distance_metric
+        )
 
         result_df["threshold"] = target_threshold
         result_df["distance"] = distances
@@ -272,7 +306,9 @@ def find(
         result_df = result_df.drop(columns=["embedding"])
         # pylint: disable=unsubscriptable-object
         result_df = result_df[result_df["distance"] <= target_threshold]
-        result_df = result_df.sort_values(by=["distance"], ascending=True).reset_index(drop=True)
+        result_df = result_df.sort_values(by=["distance"], ascending=True).reset_index(
+            drop=True
+        )
 
         resp_obj.append(result_df)
 
@@ -362,7 +398,9 @@ def __find_bulk_embeddings(
             )
 
         except ValueError as err:
-            logger.error(f"Exception while extracting faces from {employee}: {str(err)}")
+            logger.error(
+                f"Exception while extracting faces from {employee}: {str(err)}"
+            )
             img_objs = []
 
         if len(img_objs) == 0:
